@@ -1,6 +1,7 @@
 import os
 import re
 import weakref
+import tarfile
 
 import numpy as np
 
@@ -71,6 +72,11 @@ class AthenaGrid(AMRGridPatch):
         self.ActiveDimensions = dimensions.copy()
         self.file_offset = file_offset
         self.read_dims = read_dims
+        if index._is_tar:
+            self._is_tar = True
+            self._tf = index._tf
+        else:
+            self._is_tar = False
 
     def _setup_dx(self):
         # So first we figure out what the index is.  We don't assume
@@ -129,15 +135,26 @@ class AthenaHierarchy(GridIndex):
         self.directory = os.path.dirname(self.dataset.filename)
         self.dataset_type = dataset_type
         # for now, the index file is the dataset!
-        self.index_filename = os.path.join(os.getcwd(), self.dataset.filename)
-        self._fhandle = open(self.index_filename, "rb")
+        if self.dataset.filename.endswith('.tar'):
+            self._tf = ds._tf
+            self._tfnames = ds._tfnames
+            self.index_filename = ds._tfnames[-1]
+            self._fhandle = self._tf.extractfile(self.index_filename)
+            self._is_tar = True
+        else:
+            self.index_filename = os.path.join(os.getcwd(), self.dataset.filename)
+            self._fhandle = open(self.index_filename, "rb")
+            self._is_tar = False
         GridIndex.__init__(self, ds, dataset_type)
 
         self._fhandle.close()
 
     def _detect_output_fields(self):
         field_map = {}
-        f = open(self.index_filename, "rb")
+        if self._is_tar:
+            f = self._tf.extractfile(self.index_filename)
+        else:
+            f = open(self.index_filename, "rb")
         line = check_readline(f)
         chkwhile = chk23("")
         while line != chkwhile:
@@ -203,7 +220,10 @@ class AthenaHierarchy(GridIndex):
         self.num_grids = self.dataset.nvtk * self.dataset.nprocs
 
     def _parse_index(self):
-        f = open(self.index_filename, "rb")
+        if self._is_tar:
+            f = self._tf.extractfile(self.index_filename)
+        else:
+            f = open(self.index_filename, "rb")
         grid = {}
         grid["read_field"] = None
         grid["read_type"] = None
@@ -229,28 +249,31 @@ class AthenaHierarchy(GridIndex):
             raise TypeError
 
         # Need to determine how many grids: self.num_grids
-        dataset_dir = os.path.dirname(self.index_filename)
-        dname = os.path.split(self.index_filename)[-1]
-        if dataset_dir.endswith("id0"):
-            dname = "id0/" + dname
-            dataset_dir = dataset_dir[:-3]
-
-        gridlistread = sglob(
-            os.path.join(dataset_dir, f"id*/{dname[4:-9]}-id*{dname[-9:]}")
-        )
-        gridlistread.insert(0, self.index_filename)
-        if "id0" in dname:
-            gridlistread += sglob(
-                os.path.join(dataset_dir, f"id*/lev*/{dname[4:-9]}*-lev*{dname[-9:]}")
-            )
+        if self._is_tar:
+            gridlistread = self._tfnames
         else:
-            gridlistread += sglob(
-                os.path.join(dataset_dir, f"lev*/{dname[:-9]}*-lev*{dname[-9:]}")
+            dataset_dir = os.path.dirname(self.index_filename)
+            dname = os.path.split(self.index_filename)[-1]
+            if dataset_dir.endswith("id0"):
+                dname = "id0/" + dname
+                dataset_dir = dataset_dir[:-3]
+
+            gridlistread = sglob(
+                os.path.join(dataset_dir, f"id*/{dname[4:-9]}-id*{dname[-9:]}")
             )
-        ndots = dname.count(".")
-        gridlistread = [
-            fn for fn in gridlistread if os.path.basename(fn).count(".") == ndots
-        ]
+            gridlistread.insert(0, self.index_filename)
+            if "id0" in dname:
+                gridlistread += sglob(
+                    os.path.join(dataset_dir, f"id*/lev*/{dname[4:-9]}*-lev*{dname[-9:]}")
+                )
+            else:
+                gridlistread += sglob(
+                    os.path.join(dataset_dir, f"lev*/{dname[:-9]}*-lev*{dname[-9:]}")
+                )
+            ndots = dname.count(".")
+            gridlistread = [
+                fn for fn in gridlistread if os.path.basename(fn).count(".") == ndots
+            ]
         self.num_grids = len(gridlistread)
         dxs = []
         levels = np.zeros(self.num_grids, dtype="int32")
@@ -260,7 +283,10 @@ class AthenaHierarchy(GridIndex):
         j = 0
         self.grid_filenames = gridlistread
         while j < (self.num_grids):
-            f = open(gridlistread[j], "rb")
+            if self._is_tar:
+                f = self._tf.extractfile(gridlistread[j])
+            else:
+                f = open(gridlistread[j], "rb")
             gridread = {}
             gridread["read_field"] = None
             gridread["read_type"] = None
@@ -523,7 +549,15 @@ class AthenaDataset(Dataset):
         self.velocity_unit = self.length_unit / self.time_unit
 
     def _parse_parameter_file(self):
-        self._handle = open(self.parameter_filename, "rb")
+        # if self._is_tar:
+        if self.parameter_filename.endswith('.tar'):
+            self._tf = tarfile.open(self.parameter_filename)
+            self._tfnames = self._tf.getnames()[1:]
+            self._handle = self._tf.extractfile(self._tfnames[-1])
+            self._is_tar = True
+        else:
+            self._handle = open(self.parameter_filename, "rb")
+            self._is_tar = False
         # Read the start of a grid to get simulation parameters.
         grid = {}
         grid["read_field"] = None
@@ -587,27 +621,30 @@ class AthenaDataset(Dataset):
             self.gamma = float(self.specified_parameters["gamma"])
         else:
             self.gamma = 5.0 / 3.0
-        dataset_dir = os.path.dirname(self.parameter_filename)
-        dname = os.path.split(self.parameter_filename)[-1]
-        if dataset_dir.endswith("id0"):
-            dname = "id0/" + dname
-            dataset_dir = dataset_dir[:-3]
-
-        gridlistread = sglob(
-            os.path.join(dataset_dir, f"id*/{dname[4:-9]}-id*{dname[-9:]}")
-        )
-        if "id0" in dname:
-            gridlistread += sglob(
-                os.path.join(dataset_dir, f"id*/lev*/{dname[4:-9]}*-lev*{dname[-9:]}")
-            )
+        if self._is_tar:
+            gridlistread = self._tfnames[:-1]
         else:
-            gridlistread += sglob(
-                os.path.join(dataset_dir, f"lev*/{dname[:-9]}*-lev*{dname[-9:]}")
+            dataset_dir = os.path.dirname(self.parameter_filename)
+            dname = os.path.split(self.parameter_filename)[-1]
+            if dataset_dir.endswith("id0"):
+                dname = "id0/" + dname
+                dataset_dir = dataset_dir[:-3]
+
+            gridlistread = sglob(
+                os.path.join(dataset_dir, f"id*/{dname[4:-9]}-id*{dname[-9:]}")
             )
-        ndots = dname.count(".")
-        gridlistread = [
-            fn for fn in gridlistread if os.path.basename(fn).count(".") == ndots
-        ]
+            if "id0" in dname:
+                gridlistread += sglob(
+                    os.path.join(dataset_dir, f"id*/lev*/{dname[4:-9]}*-lev*{dname[-9:]}")
+                )
+            else:
+                gridlistread += sglob(
+                    os.path.join(dataset_dir, f"lev*/{dname[:-9]}*-lev*{dname[-9:]}")
+                )
+            ndots = dname.count(".")
+            gridlistread = [
+                fn for fn in gridlistread if os.path.basename(fn).count(".") == ndots
+            ]
         self.nvtk = len(gridlistread) + 1
 
         self.current_redshift = 0.0
@@ -631,10 +668,7 @@ class AthenaDataset(Dataset):
 
     @classmethod
     def _is_valid(cls, filename, *args, **kwargs):
-        if not filename.endswith(".vtk"):
-            return False
-
-        with open(filename, "rb") as fh:
+        def test_valid(fh):
             if not re.match(b"# vtk DataFile Version \\d\\.\\d\n", fh.readline(256)):
                 return False
             if (
@@ -652,6 +686,15 @@ class AthenaDataset(Dataset):
                 # https://princetonuniversity.github.io/Athena-Cversion/AthenaDocsUGbtk
                 return False
         return True
+
+        if filename.endswith(".vtk"):
+            with open(filename, "rb") as fh:
+                return test_valid(fh)
+        elif filename.endswith(".tar"):
+            tf = tarfile.open(filename)
+            tfnames = tf.getnames()[1:]
+            with tf.extractfile(tfnames[-1]) as fh:
+                return test_valid(fh)
 
     @property
     def _skip_cache(self):
