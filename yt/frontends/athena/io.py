@@ -1,4 +1,5 @@
 import numpy as np
+import struct
 
 from yt.funcs import mylog
 from yt.utilities.io_handler import BaseIOHandler
@@ -31,7 +32,10 @@ class IOHandlerAthena(BaseIOHandler):
         for grid in chunk.objs:
             if grid.filename is None:
                 continue
-            f = open(grid.filename, "rb")
+            if grid._is_tar:
+                f = grid._tf.extractfile(grid.filename)
+            else:
+                f = open(grid.filename, "rb")
             data[grid.id] = {}
             grid_dims = grid.ActiveDimensions
             read_dims = grid.read_dims.astype("int64")
@@ -62,13 +66,25 @@ class IOHandlerAthena(BaseIOHandler):
                     dt = ">f8"
                 if ftype == "scalar":
                     f.seek(read_table_offset + offset + file_offset)
-                    v = np.fromfile(f, dtype=dt, count=grid_ncells).reshape(
-                        read_dims, order="F"
-                    )
+                    if grid._is_tar:
+                        _dtype = dtype[0]
+                        _dsize = struct.calcsize(_dtype)
+                        v = np.asarray(struct.unpack('>' + grid_ncells*_dtype,
+                                                     f.read(grid_ncells*_dsize)))
+                    else:
+                        v = np.fromfile(f, dtype=dt, count=grid_ncells)
+                    v = v.reshape(read_dims, order="F")
                 if ftype == "vector":
                     vec_offset = axis_list.index(field[-1][-2:])
                     f.seek(read_table_offset + offset + 3 * file_offset)
-                    v = np.fromfile(f, dtype=dt, count=3 * grid_ncells)
+                    if grid._is_tar:
+                        _dtype = dtype[0]
+                        _dsize = struct.calcsize(_dtype)
+                        v = np.asarray(struct.unpack('>' + 3*grid_ncells*_dtype,
+                                                     f.read(3*grid_ncells*_dsize)))
+                        v = v.reshape(read_dims, order="F")
+                    else:
+                        v = np.fromfile(f, dtype=dt, count=3 * grid_ncells)
                     v = v[vec_offset::3].reshape(read_dims, order="F")
                 if grid.ds.field_ordering == 1:
                     data[grid.id][field] = v[xread, yread, :].T.astype("float64")
