@@ -82,7 +82,6 @@ class IOHandlerAthena(BaseIOHandler):
                         _dsize = struct.calcsize(_dtype)
                         v = np.asarray(struct.unpack('>' + 3*grid_ncells*_dtype,
                                                      f.read(3*grid_ncells*_dsize)))
-                        v = v.reshape(read_dims, order="F")
                     else:
                         v = np.fromfile(f, dtype=dt, count=3 * grid_ncells)
                     v = v[vec_offset::3].reshape(read_dims, order="F")
