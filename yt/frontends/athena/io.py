@@ -69,8 +69,10 @@ class IOHandlerAthena(BaseIOHandler):
                     if grid._is_tar:
                         _dtype = dtype[0]
                         _dsize = struct.calcsize(_dtype)
-                        v = np.asarray(struct.unpack('>' + grid_ncells*_dtype,
-                                                     f.read(grid_ncells*_dsize)))
+                        #v = np.asarray(struct.unpack('>' + grid_ncells*_dtype,
+                        #                             f.read(grid_ncells*_dsize)))
+                        v = (np.frombuffer(buffer=f.read(grid_ncells*_dsize),
+                                                  dtype=_dtype)).newbyteorder()
                     else:
                         v = np.fromfile(f, dtype=dt, count=grid_ncells)
                     v = v.reshape(read_dims, order="F")
@@ -80,8 +82,10 @@ class IOHandlerAthena(BaseIOHandler):
                     if grid._is_tar:
                         _dtype = dtype[0]
                         _dsize = struct.calcsize(_dtype)
-                        v = np.asarray(struct.unpack('>' + 3*grid_ncells*_dtype,
-                                                     f.read(3*grid_ncells*_dsize)))
+                        #v = np.asarray(struct.unpack('>' + 3*grid_ncells*_dtype,
+                        #                             f.read(3*grid_ncells*_dsize)))
+                        v = (np.frombuffer(buffer=f.read(3*grid_ncells*_dsize),
+                                                  dtype=_dtype)).newbyteorder()
                     else:
                         v = np.fromfile(f, dtype=dt, count=3 * grid_ncells)
                     v = v[vec_offset::3].reshape(read_dims, order="F")
