@@ -14,7 +14,7 @@ from matplotlib.font_manager import FontProperties
 from unyt.dimensions import length
 
 from yt._maintenance.deprecation import issue_deprecation_warning
-from yt._typing import Quantity
+from yt._typing import FieldKey, Quantity
 from yt.config import ytcfg
 from yt.data_objects.time_series import DatasetSeries
 from yt.funcs import ensure_dir, is_sequence, iter_fields
@@ -61,6 +61,7 @@ def accepts_all_fields(func):
     field == 'all', looping over all fields already present in the PlotContainer object.
 
     """
+
     # This is to be applied to PlotContainer class methods with the following signature:
     #
     # f(self, field, *args, **kwargs) -> self
@@ -132,13 +133,13 @@ class PlotContainer(abc.ABC):
         if sys.version_info >= (3, 9):
             font_dict = DEFAULT_FONT_PROPERTIES | {"size": fontsize}
         else:
-            font_dict = {**DEFAULT_FONT_PROPERTIES, "size": fontsize}  # type:ignore
+            font_dict = {**DEFAULT_FONT_PROPERTIES, "size": fontsize}
 
         self._font_properties = FontProperties(**font_dict)
         self._font_color = None
         self._xlabel = None
         self._ylabel = None
-        self._minorticks: Dict[Tuple[str, str], bool] = {}
+        self._minorticks: Dict[FieldKey, bool] = {}
 
     @accepts_all_fields
     @invalidate_plot
@@ -450,10 +451,11 @@ class PlotContainer(abc.ABC):
             self._font_color = font_dict.pop("color")
         # Set default values if the user does not explicitly set them.
         # this prevents reverting to the matplotlib defaults.
+        _default_size = {"size": self.__class__._default_font_size}
         if sys.version_info >= (3, 9):
-            font_dict = DEFAULT_FONT_PROPERTIES | font_dict
+            font_dict = DEFAULT_FONT_PROPERTIES | _default_size | font_dict
         else:
-            font_dict = {**DEFAULT_FONT_PROPERTIES, **font_dict}
+            font_dict = {**DEFAULT_FONT_PROPERTIES, **_default_size, **font_dict}
         self._font_properties = FontProperties(**font_dict)
         return self
 
@@ -530,7 +532,8 @@ class PlotContainer(abc.ABC):
             if new_suffix != suffix:
                 warnings.warn(
                     f"Overriding suffix {suffix!r} with mpl_kwargs['format'] = {new_suffix!r}. "
-                    "Use the `suffix` argument directly to suppress this warning."
+                    "Use the `suffix` argument directly to suppress this warning.",
+                    stacklevel=2,
                 )
             suffix = new_suffix
 
@@ -897,7 +900,6 @@ class ImagePlotContainer(PlotContainer, abc.ABC):
     def _get_default_handlers(
         self, field, default_display_units: Unit
     ) -> Tuple[NormHandler, ColorbarHandler]:
-
         usr_units_str = get_default_from_config(
             self.data_source, field=field, keys="units", defaults=[None]
         )
@@ -1094,7 +1096,6 @@ class ImagePlotContainer(PlotContainer, abc.ABC):
 
 
 class BaseLinePlot(PlotContainer, abc.ABC):
-
     # A common ancestor to LinePlot and ProfilePlot
 
     @abc.abstractmethod
@@ -1107,7 +1108,7 @@ class BaseLinePlot(PlotContainer, abc.ABC):
         axrect = self._get_axrect()
 
         pnh = NormHandler(self.data_source, display_units=self.data_source[field].units)
-        finfo = self.data_source.ds._get_field_info(*field)
+        finfo = self.data_source.ds._get_field_info(field)
         if not finfo.take_log:
             pnh.norm_type = Normalize
         plot = PlotMPL(self.figure_size, axrect, norm_handler=pnh)

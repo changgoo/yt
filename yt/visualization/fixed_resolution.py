@@ -1,10 +1,11 @@
 import weakref
 from functools import partial
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
 
 from yt._maintenance.deprecation import issue_deprecation_warning
+from yt._typing import FieldKey
 from yt.data_objects.image_array import ImageArray
 from yt.frontends.ytdata.utilities import save_as_dataset
 from yt.funcs import get_output_filename, iter_fields, mylog
@@ -121,7 +122,7 @@ class FixedResolutionBuffer:
         # note that this import statement is actually crucial at runtime:
         # the filter methods for the present class are defined only when
         # fixed_resolution_filters is imported, so we need to guarantee
-        # that it happens no later than instanciation
+        # that it happens no later than instantiation
         from yt.visualization.fixed_resolution_filters import (
             FixedResolutionBufferFilter,
         )
@@ -135,7 +136,7 @@ class FixedResolutionBuffer:
             ds.plots.append(weakref.proxy(self))
 
         # Handle periodicity, just in case
-        if self.data_source.axis < 3:
+        if self.data_source.axis is not None:
             DLE = self.ds.domain_left_edge
             DRE = self.ds.domain_right_edge
             DD = float(self.periodic) * (DRE - DLE)
@@ -218,7 +219,7 @@ class FixedResolutionBuffer:
     def _get_info(self, item):
         info = {}
         ftype, fname = field = self.data_source._determine_fields(item)[0]
-        finfo = self.data_source.ds._get_field_info(*field)
+        finfo = self.data_source.ds._get_field_info(field)
         info["data_source"] = self.data_source.__str__()
         info["axis"] = self.data_source.axis
         info["field"] = str(item)
@@ -357,7 +358,7 @@ class FixedResolutionBuffer:
             fields = list(self.data.keys())
         output = h5py.File(filename, mode="a")
         for field in fields:
-            output.create_dataset(field, data=self[field])
+            output.create_dataset("_".join(field), data=self[field])
         output.close()
 
     def to_fits_data(self, fields=None, other_keys=None, length_unit=None, **kwargs):
@@ -623,12 +624,13 @@ class OffAxisProjectionFixedResolutionBuffer(FixedResolutionBuffer):
         )
         if self.data_source.moment == 2:
 
-            def _sq_field(field, data, item: Tuple[str, str]):
+            def _sq_field(field, data, item: FieldKey):
                 return data[item] ** 2
 
-            fd = self.ds._get_field_info(*item)
+            fd = self.ds._get_field_info(item)
+            ftype, fname = item
 
-            item_sq = (item[0], f"tmp_{item[1]}_squared")
+            item_sq = (ftype, f"tmp_{fname}_squared")
             self.ds.add_field(
                 item_sq,
                 partial(_sq_field, item=item),

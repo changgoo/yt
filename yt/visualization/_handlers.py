@@ -285,12 +285,16 @@ class NormHandler:
         dvmin = dvmax = None
 
         finite_values_mask = np.isfinite(data)
-        if self.vmin not in (None, "min"):
+        if self.vmin is not None and not (
+            isinstance(self.vmin, str) and self.vmin == "min"
+        ):
             dvmin = self.to_float(self.vmin)
         elif np.any(finite_values_mask):
             dvmin = self.to_float(np.nanmin(data[finite_values_mask]))
 
-        if self.vmax not in (None, "max"):
+        if self.vmax is not None and not (
+            isinstance(self.vmax, str) and self.vmax == "max"
+        ):
             dvmax = self.to_float(self.vmax)
         elif np.any(finite_values_mask):
             dvmax = self.to_float(np.nanmax(data[finite_values_mask]))
@@ -410,7 +414,7 @@ class ColorbarHandler:
     def draw_cbar(self, newval) -> None:
         if not isinstance(newval, bool):
             raise TypeError(
-                f"Excpected a boolean, got {newval} with type {type(newval)}"
+                f"Expected a boolean, got {newval} with type {type(newval)}"
             )
         self._draw_cbar = newval
 
@@ -422,7 +426,7 @@ class ColorbarHandler:
     def draw_minorticks(self, newval) -> None:
         if not isinstance(newval, bool):
             raise TypeError(
-                f"Excpected a boolean, got {newval} with type {type(newval)}"
+                f"Expected a boolean, got {newval} with type {type(newval)}"
             )
         self._draw_minorticks = newval
 

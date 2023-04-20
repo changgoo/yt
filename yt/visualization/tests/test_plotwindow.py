@@ -83,13 +83,19 @@ CENTER_SPECS = (
     "M",
     "max",
     "Max",
+    "min",
+    "Min",
     "c",
     "C",
     "center",
     "Center",
+    "left",
+    "right",
     [0.5, 0.5, 0.5],
     [[0.2, 0.3, 0.4], "cm"],
     YTArray([0.3, 0.4, 0.7], "cm"),
+    ("max", ("gas", "density")),
+    ("min", ("gas", "density")),
 )
 
 WIDTH_SPECS = {
@@ -196,7 +202,6 @@ def test_attributes():
 
 
 class TestHideAxesColorbar(unittest.TestCase):
-
     ds = None
 
     def setUp(self):
@@ -232,7 +237,6 @@ class TestHideAxesColorbar(unittest.TestCase):
 
 
 class TestSetWidth(unittest.TestCase):
-
     ds = None
 
     def setUp(self):
@@ -388,7 +392,6 @@ class TestPlotWindowSave(unittest.TestCase):
 
 
 class TestPerFieldConfig(unittest.TestCase):
-
     ds = None
 
     def setUp(self):
@@ -445,7 +448,6 @@ class TestPerFieldConfig(unittest.TestCase):
         assert_equal(self.proj.frb["gas", "pressure"].units, Unit("dyn/cm"))
 
     def test_scale(self):
-
         assert_equal(
             self.proj.plots["gas", "density"].norm_handler.norm_type, Normalize
         )
@@ -611,7 +613,7 @@ def test_set_background_color():
     ds = fake_random_ds(32)
     plot = SlicePlot(ds, 2, ("gas", "density"))
     plot.set_background_color(("gas", "density"), "red")
-    plot._setup_plots()
+    plot.render()
     ax = plot.plots[("gas", "density")].axes
     assert_equal(ax.get_facecolor(), (1.0, 0.0, 0.0, 1.0))
 
@@ -836,7 +838,7 @@ def test_nan_data():
 
 def test_sanitize_valid_normal_vector():
     # note: we don't test against non-cartesian geometries
-    # because the way normal "vectors" work isn't cleary
+    # because the way normal "vectors" work isn't clearly
     # specified and works more as an implementation detail
     # at the moment
     ds = fake_amr_ds(geometry="cartesian")
@@ -912,3 +914,19 @@ def test_invalid_swap_projection():
     slc.set_mpl_projection("Robinson")
     slc.swap_axes()  # should raise mylog.warning and not toggle _swap_axes
     assert slc._has_swapped_axes is False
+
+
+def test_set_font():
+    # simply check that calling the set_font method doesn't raise an error
+    # https://github.com/yt-project/yt/issues/4263
+    ds = fake_amr_ds()
+    slc = SlicePlot(ds, "x", "Density")
+    slc.set_font(
+        {
+            "family": "sans-serif",
+            "style": "italic",
+            "weight": "bold",
+            "size": 24,
+            "color": "blue",
+        }
+    )

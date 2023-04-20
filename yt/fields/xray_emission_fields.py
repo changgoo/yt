@@ -81,7 +81,6 @@ class XrayEmissivityIntegrator:
     """
 
     def __init__(self, table_type, redshift=0.0, data_dir=None, use_metals=True):
-
         filename = _get_data_file(table_type, data_dir=data_dir)
         only_on_root(mylog.info, "Loading emissivity data from %s", filename)
         in_file = h5py.File(filename, mode="r")
@@ -216,7 +215,7 @@ def add_xray_emissivity_field(
     """
     if not isinstance(metallicity, float) and metallicity is not None:
         try:
-            metallicity = ds._get_field_info(*metallicity)
+            metallicity = ds._get_field_info(metallicity)
         except YTFieldNotFound as e:
             raise RuntimeError(
                 f"Your dataset does not have a {metallicity} field! "
@@ -313,7 +312,6 @@ def add_xray_emissivity_field(
     fields = [emiss_name, lum_name, phot_name]
 
     if redshift > 0.0 or dist is not None:
-
         if dist is None:
             if cosmology is None:
                 if hasattr(ds, "cosmology"):

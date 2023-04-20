@@ -2,13 +2,11 @@ import sys
 import warnings
 from abc import ABC
 from io import BytesIO
-from typing import Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import matplotlib
 import numpy as np
-from matplotlib.axis import Axis
 from matplotlib.colors import LogNorm, Normalize, SymLogNorm
-from matplotlib.figure import Figure
 from matplotlib.ticker import LogFormatterMathtext
 from packaging.version import Version
 
@@ -22,6 +20,10 @@ from ._commons import (
     get_symlog_minorticks,
     validate_image_name,
 )
+
+if TYPE_CHECKING:
+    from matplotlib.axis import Axis
+    from matplotlib.figure import Figure
 
 BACKEND_SPECS = {
     "GTK": ["backend_gtk", "FigureCanvasGTK", "FigureManagerGTK"],
@@ -56,7 +58,7 @@ class CallbackWrapper:
             if viewer._has_swapped_axes:
                 # store the original un-transposed shape
                 self.raw_image_shape = self.raw_image_shape[1], self.raw_image_shape[0]
-        if frb.axis < 3:
+        if frb.axis is not None:
             DD = frb.ds.domain_width
             xax = frb.ds.coordinates.x_axis[frb.axis]
             yax = frb.ds.coordinates.y_axis[frb.axis]
@@ -91,8 +93,8 @@ class PlotMPL:
         axrect,
         *,
         norm_handler: NormHandler,
-        figure: Optional[Figure] = None,
-        axes: Optional[Axis] = None,
+        figure: Optional["Figure"] = None,
+        axes: Optional["Axis"] = None,
     ):
         """Initialize PlotMPL class"""
         import matplotlib.figure
@@ -128,7 +130,6 @@ class PlotMPL:
         self.axes = self.figure.add_axes(axrect)
 
     def _get_canvas_classes(self):
-
         if self.interactivity:
             key = str(matplotlib.get_backend())
         else:
@@ -198,7 +199,7 @@ class PlotMPL:
         for label in self._get_labels():
             label.set_fontproperties(font_properties)
             if font_color is not None:
-                label.set_color(self.font_color)
+                label.set_color(font_color)
 
     def _repr_png_(self):
         from ._mpl_imports import FigureCanvasAgg
@@ -224,9 +225,9 @@ class ImagePlotMPL(PlotMPL, ABC):
         *,
         norm_handler: NormHandler,
         colorbar_handler: ColorbarHandler,
-        figure: Optional[Figure] = None,
-        axes: Optional[Axis] = None,
-        cax: Optional[Axis] = None,
+        figure: Optional["Figure"] = None,
+        axes: Optional["Axis"] = None,
+        cax: Optional["Axis"] = None,
     ):
         """Initialize ImagePlotMPL class object"""
         self.colorbar_handler = colorbar_handler
@@ -336,7 +337,8 @@ class ImagePlotMPL(PlotMPL, ABC):
                         "with matplotlib versions older than 3.5\n"
                         "Please try upgrading matplotlib to a more recent version. "
                         "If the problem persists, please file a report to "
-                        "https://github.com/yt-project/yt/issues/new"
+                        "https://github.com/yt-project/yt/issues/new",
+                        stacklevel=2,
                     )
                 else:
                     raise exc
@@ -404,7 +406,7 @@ class ImagePlotMPL(PlotMPL, ABC):
         # - self._draw_axes: bool
         # - self.colorbar_handler: ColorbarHandler
 
-        # optional attribtues
+        # optional attributes
         # - self._unit_aspect: float
 
         # Ensure the figure size along the long axis is always equal to _figure_size

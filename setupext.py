@@ -13,11 +13,14 @@ from distutils.ccompiler import CCompiler, new_compiler
 from distutils.sysconfig import customize_compiler
 from subprocess import PIPE, Popen
 from sys import platform as _platform
-
-from pkg_resources import resource_filename
 from setuptools.command.build_ext import build_ext as _build_ext
 from setuptools.command.sdist import sdist as _sdist
 from setuptools.errors import CompileError, LinkError
+
+if sys.version_info >= (3, 9):
+    import importlib.resources as importlib_resources
+else:
+    import importlib_resources
 
 log = logging.getLogger("setupext")
 
@@ -204,8 +207,9 @@ def check_CPP14_flags(possible_compile_flags):
 def check_for_pyembree(std_libs):
     embree_libs = []
     embree_aliases = {}
+
     try:
-        _ = resource_filename("pyembree", "rtcore.pxd")
+        importlib_resources.files("pyembree")
     except ImportError:
         return embree_libs, embree_aliases
 

@@ -1,21 +1,23 @@
 import inspect
 import re
+import sys
 import warnings
 from abc import ABC, abstractmethod
 from functools import update_wrapper
-from numbers import Integral, Number, Real
+from numbers import Integral, Number
 from typing import Any, Dict, Optional, Tuple, Type, Union
 
 import matplotlib
 import numpy as np
 
 from yt._maintenance.deprecation import issue_deprecation_warning
+from yt._typing import AnyFieldKey
 from yt.data_objects.data_containers import YTDataContainer
 from yt.data_objects.level_sets.clump_handling import Clump
 from yt.data_objects.selection_objects.cut_region import YTCutRegion
 from yt.frontends.ytdata.data_structures import YTClumpContainer
 from yt.funcs import is_sequence, mylog, validate_width_tuple
-from yt.geometry.geometry_handler import is_curvilinear
+from yt.geometry.api import Geometry
 from yt.geometry.unstructured_mesh_handler import UnstructuredIndex
 from yt.units import dimensions
 from yt.units.yt_array import YTArray, YTQuantity, uhstack  # type: ignore
@@ -36,6 +38,11 @@ from yt.visualization._commons import (
 from yt.visualization.base_plot_types import CallbackWrapper
 from yt.visualization.image_writer import apply_colormap
 from yt.visualization.plot_window import PWViewerMPL
+
+if sys.version_info >= (3, 11):
+    from typing import assert_never
+else:
+    from typing_extensions import assert_never
 
 callback_registry: Dict[str, Type["PlotCallback"]] = {}
 
@@ -121,7 +128,7 @@ class PlotCallback(ABC):
         pass
 
     @abstractmethod
-    def __call__(self, plot: CallbackWrapper) -> None:
+    def __call__(self, plot: CallbackWrapper) -> Any:
         pass
 
     def _project_coords(self, plot, coord):
@@ -142,7 +149,7 @@ class PlotCallback(ABC):
             ax = plot.data.axis
             # if this is an on-axis projection or slice, then
             # just grab the appropriate 2 coords for the on-axis view
-            if ax >= 0 and ax <= 2:
+            if ax is not None:
                 (xi, yi) = (
                     plot.data.ds.coordinates.x_axis[ax],
                     plot.data.ds.coordinates.y_axis[ax],
@@ -152,7 +159,7 @@ class PlotCallback(ABC):
             # if this is an off-axis project or slice (ie cutting plane)
             # we have to calculate where the data coords fall in the projected
             # plane
-            elif ax == 4:
+            else:
                 # transpose is just to get [[x1,x2,...],[y1,y2,...],[z1,z2,...]]
                 # in the same order as plot.data.center for array arithmetic
                 coord_vectors = coord_copy.transpose() - plot.data.center
@@ -161,8 +168,6 @@ class PlotCallback(ABC):
                 # Transpose into image coords. Due to VR being not a
                 # right-handed coord system
                 ret_coord = (y, x)
-            else:
-                raise ValueError("Object being plotted must have a `data.axis` defined")
 
         # if the position is already two-coords, it is expected to be
         # in the proper projected orientation
@@ -445,16 +450,27 @@ class VelocityCallback(PlotCallback):
 
         self.plot_args = plot_args
 
-    def __call__(self, plot):
+    def __call__(self, plot) -> "BaseQuiverCallback":
         ftype = plot.data._current_fluid_type
         # Instantiation of these is cheap
+        geometry: Geometry = plot.data.ds.geometry
         if plot._type_name == "CuttingPlane":
-            if is_curvilinear(plot.data.ds.geometry):
+            if geometry is Geometry.CARTESIAN:
+                pass
+            elif (
+                geometry is Geometry.POLAR
+                or geometry is Geometry.CYLINDRICAL
+                or geometry is Geometry.SPHERICAL
+                or geometry is Geometry.GEOGRAPHIC
+                or geometry is Geometry.INTERNAL_GEOGRAPHIC
+                or geometry is Geometry.SPECTRAL_CUBE
+            ):
                 raise NotImplementedError(
-                    "Velocity annotation for cutting \
-                    plane is not supported for %s geometry"
-                    % plot.data.ds.geometry
+                    f"annotate_velocity is not supported for cutting plane for {geometry=}"
                 )
+            else:
+                assert_never(geometry)
+        qcb: "BaseQuiverCallback"
         if plot._type_name == "CuttingPlane":
             qcb = CuttingQuiverCallback(
                 (ftype, "cutting_plane_velocity_x"),
@@ -477,15 +493,16 @@ class VelocityCallback(PlotCallback):
             else:
                 bv_x = bv_y = 0
 
-            if (
-                plot.data.ds.geometry in ["polar", "cylindrical"]
-                and axis_names[plot.data.axis] == "z"
-            ):
-                # polar_z and cyl_z is aligned with carteian_z
-                # should convert r-theta plane to x-y plane
-                xv = (ftype, "velocity_cartesian_x")
-                yv = (ftype, "velocity_cartesian_y")
-            elif plot.data.ds.geometry == "spherical":
+            if geometry is Geometry.POLAR or geometry is Geometry.CYLINDRICAL:
+                if axis_names[plot.data.axis] == "z":
+                    # polar_z and cyl_z is aligned with cartesian_z
+                    # should convert r-theta plane to x-y plane
+                    xv = (ftype, "velocity_cartesian_x")
+                    yv = (ftype, "velocity_cartesian_y")
+                else:
+                    xv = (ftype, f"velocity_{axis_names[xax]}")
+                    yv = (ftype, f"velocity_{axis_names[yax]}")
+            elif geometry is Geometry.SPHERICAL:
                 if axis_names[plot.data.axis] == "phi":
                     xv = (ftype, "velocity_cylindrical_radius")
                     yv = (ftype, "velocity_cylindrical_z")
@@ -496,11 +513,19 @@ class VelocityCallback(PlotCallback):
                     raise NotImplementedError(
                         f"annotate_velocity is missing support for normal={axis_names[plot.data.axis]!r}"
                     )
-            else:
-                # for other cases (even for cylindrical geometry),
-                # orthogonal planes are generically Cartesian
+            elif geometry is Geometry.CARTESIAN:
                 xv = (ftype, f"velocity_{axis_names[xax]}")
                 yv = (ftype, f"velocity_{axis_names[yax]}")
+            elif (
+                geometry is Geometry.GEOGRAPHIC
+                or geometry is Geometry.INTERNAL_GEOGRAPHIC
+                or geometry is Geometry.SPECTRAL_CUBE
+            ):
+                raise NotImplementedError(
+                    f"annotate_velocity is not supported for {geometry=}"
+                )
+            else:
+                assert_never(geometry)
 
             # determine the full fields including field type
             xv = plot.data._determine_fields(xv)[0]
@@ -566,16 +591,27 @@ class MagFieldCallback(PlotCallback):
             plot_args = kwargs
         self.plot_args = plot_args
 
-    def __call__(self, plot):
+    def __call__(self, plot) -> "BaseQuiverCallback":
         ftype = plot.data._current_fluid_type
         # Instantiation of these is cheap
+        geometry: Geometry = plot.data.ds.geometry
+        qcb: "BaseQuiverCallback"
         if plot._type_name == "CuttingPlane":
-            if is_curvilinear(plot.data.ds.geometry):
+            if geometry is Geometry.CARTESIAN:
+                pass
+            elif (
+                geometry is Geometry.POLAR
+                or geometry is Geometry.CYLINDRICAL
+                or geometry is Geometry.SPHERICAL
+                or geometry is Geometry.GEOGRAPHIC
+                or geometry is Geometry.INTERNAL_GEOGRAPHIC
+                or geometry is Geometry.SPECTRAL_CUBE
+            ):
                 raise NotImplementedError(
-                    "Magnetic field annotation for cutting \
-                    plane is not supported for %s geometry"
-                    % plot.data.ds.geometry
+                    f"annotate_magnetic_field is not supported for cutting plane for {geometry=}"
                 )
+            else:
+                assert_never(geometry)
             qcb = CuttingQuiverCallback(
                 (ftype, "cutting_plane_magnetic_field_x"),
                 (ftype, "cutting_plane_magnetic_field_y"),
@@ -590,15 +626,16 @@ class MagFieldCallback(PlotCallback):
             yax = plot.data.ds.coordinates.y_axis[plot.data.axis]
             axis_names = plot.data.ds.coordinates.axis_name
 
-            if (
-                plot.data.ds.geometry in ["polar", "cylindrical"]
-                and axis_names[plot.data.axis] == "z"
-            ):
-                # polar_z and cyl_z is aligned with carteian_z
-                # should convert r-theta plane to x-y plane
-                xv = (ftype, "magnetic_field_cartesian_x")
-                yv = (ftype, "magnetic_field_cartesian_y")
-            elif plot.data.ds.geometry == "spherical":
+            if geometry is Geometry.POLAR or geometry is Geometry.CYLINDRICAL:
+                if axis_names[plot.data.axis] == "z":
+                    # polar_z and cyl_z is aligned with cartesian_z
+                    # should convert r-theta plane to x-y plane
+                    xv = (ftype, "magnetic_field_cartesian_x")
+                    yv = (ftype, "magnetic_field_cartesian_y")
+                else:
+                    xv = (ftype, f"magnetic_field_{axis_names[xax]}")
+                    yv = (ftype, f"magnetic_field_{axis_names[yax]}")
+            elif geometry is Geometry.SPHERICAL:
                 if axis_names[plot.data.axis] == "phi":
                     xv = (ftype, "magnetic_field_cylindrical_radius")
                     yv = (ftype, "magnetic_field_cylindrical_z")
@@ -609,11 +646,19 @@ class MagFieldCallback(PlotCallback):
                     raise NotImplementedError(
                         f"annotate_magnetic_field is missing support for normal={axis_names[plot.data.axis]!r}"
                     )
-            else:
-                # for other cases (even for cylindrical geometry),
-                # orthogonal planes are generically Cartesian
+            elif geometry is Geometry.CARTESIAN:
                 xv = (ftype, f"magnetic_field_{axis_names[xax]}")
                 yv = (ftype, f"magnetic_field_{axis_names[yax]}")
+            elif (
+                geometry is Geometry.GEOGRAPHIC
+                or geometry is Geometry.INTERNAL_GEOGRAPHIC
+                or geometry is Geometry.SPECTRAL_CUBE
+            ):
+                raise NotImplementedError(
+                    f"annotate_magnetic_field is not supported for {geometry=}"
+                )
+            else:
+                assert_never(geometry)
 
             qcb = QuiverCallback(
                 xv,
@@ -668,7 +713,6 @@ class BaseQuiverCallback(PlotCallback, ABC):
         pass
 
     def __call__(self, plot):
-
         # construct mesh
         bounds = self._physical_bounds(plot)
         nx = plot.raw_image_shape[1] // self.factor[0]
@@ -842,14 +886,14 @@ class ContourCallback(PlotCallback):
 
     def __init__(
         self,
-        field: Union[Tuple[str, str], str],
+        field: AnyFieldKey,
         levels: int = 5,
         *,
         factor: Union[Tuple[int, int], int] = 4,
         clim: Optional[Tuple[float, float]] = None,
         label: bool = False,
         take_log: Optional[bool] = None,
-        data_source: YTDataContainer = None,
+        data_source: Optional[YTDataContainer] = None,
         plot_args: Optional[Dict[str, Any]] = None,
         text_args: Optional[Dict[str, Any]] = None,
         ncont: Optional[int] = None,  # deprecated
@@ -879,7 +923,7 @@ class ContourCallback(PlotCallback):
         self.text_args = text_args
         self.data_source = data_source
 
-    def __call__(self, plot):
+    def __call__(self, plot) -> None:
         from matplotlib.tri import LinearTriInterpolator, Triangulation
 
         # These need to be in code_length
@@ -917,7 +961,7 @@ class ContourCallback(PlotCallback):
                 XShifted = data["px"].copy()
                 YShifted = data["py"].copy()
                 dom_x, dom_y = plot._period
-                for shift in np.mgrid[-1:1:3j]:
+                for shift in np.mgrid[-1:1:3j]:  # type: ignore [misc]
                     xlim = (data["px"] + shift * dom_x >= x0) & (
                         data["px"] + shift * dom_x <= x1
                     )
@@ -950,12 +994,12 @@ class ContourCallback(PlotCallback):
             take_log = self.take_log
         else:
             field = data._determine_fields([self.field])[0]
-            take_log = plot.ds._get_field_info(*field).take_log
+            take_log = plot.ds._get_field_info(field).take_log
 
         if take_log:
             zi = np.log10(zi)
 
-        clim: Union[Tuple[Real, Real], None]
+        clim: Optional[Tuple[float, float]]
         if take_log and self.clim is not None:
             clim = np.log10(self.clim[0]), np.log10(self.clim[1])
         else:
@@ -1169,7 +1213,13 @@ class StreamlineCallback(PlotCallback):
     """
 
     _type_name = "streamlines"
-    _supported_geometries = ("cartesian", "spectral_cube", "polar", "cylindrical")
+    _supported_geometries = (
+        "cartesian",
+        "spectral_cube",
+        "polar",
+        "cylindrical",
+        "spherical",
+    )
     _incompatible_plot_types = ("OffAxisProjection", "Particle")
 
     def __init__(
@@ -1223,7 +1273,6 @@ class StreamlineCallback(PlotCallback):
             )
 
             if self.display_threshold:
-
                 mask = field_colors > self.display_threshold
                 lwdefault = matplotlib.rcParams["lines.linewidth"]
 
@@ -1665,7 +1714,7 @@ class ArrowCallback(PlotCallback):
             dy = (yy1 - yy0) * 2 ** (0.5) * self.length
         # If the arrow is 0 length
         if dx == dy == 0:
-            warnings.warn("The arrow has zero length.  Not annotating.")
+            warnings.warn("The arrow has zero length. Not annotating.", stacklevel=2)
             return
 
         x, y, dx, dy = self._sanitize_xy_order(plot, x, y, dx, dy)
@@ -2234,7 +2283,6 @@ class MeshLinesCallback(PlotCallback):
         return new_coords, new_connects
 
     def __call__(self, plot):
-
         index = plot.ds.index
         if not issubclass(type(index), UnstructuredIndex):
             raise RuntimeError(
@@ -2433,7 +2481,6 @@ class TimestampCallback(PlotCallback):
         text_args=None,
         inset_box_args=None,
     ):
-
         def_text_args = {
             "color": "white",
             "horizontalalignment": "center",
@@ -2536,14 +2583,17 @@ class TimestampCallback(PlotCallback):
         if self.time and self.redshift:
             self.text += "\n"
 
+        if self.redshift and not hasattr(plot.data.ds, "current_redshift"):
+            warnings.warn(
+                f"dataset {plot.data.ds} does not have current_redshift attribute. "
+                "Set redshift=False to silence this warning.",
+                stacklevel=2,
+            )
+            self.redshift = False
+
         # If we're annotating the redshift, put it in the correct format
         if self.redshift:
-            try:
-                z = plot.data.ds.current_redshift
-            except AttributeError:
-                raise AttributeError(
-                    "Dataset does not have current_redshift. Set redshift=False."
-                )
+            z = plot.data.ds.current_redshift
             # Replace instances of -0.0* with 0.0* to avoid
             # negative null redshifts (e.g., "-0.00").
             self.text += self.redshift_format.format(redshift=float(z))
@@ -2670,7 +2720,6 @@ class ScaleCallback(PlotCallback):
         inset_box_args=None,
         scale_text_format="{scale} {units}",
     ):
-
         def_size_bar_args = {"pad": 0.05, "sep": 5, "borderpad": 1, "color": "w"}
 
         def_inset_box_args = {
@@ -2770,8 +2819,8 @@ class ScaleCallback(PlotCallback):
             except AttributeError as e:
                 raise AttributeError(
                     "Cannot set text_args keyword "
-                    "to include '%s' because MPL's fontproperties object does "
-                    "not contain function '%s'." % (key, setter_func)
+                    f"to include {key!r} because MPL's fontproperties object does "
+                    f"not contain function {setter_func!r}"
                 ) from e
 
         # this "anchors" the size bar to a box centered on self.pos in axis
@@ -3010,7 +3059,13 @@ class LineIntegralConvolutionCallback(PlotCallback):
     """
 
     _type_name = "line_integral_convolution"
-    _supported_geometries = ("cartesian", "spectral_cube", "polar", "cylindrical")
+    _supported_geometries = (
+        "cartesian",
+        "spectral_cube",
+        "polar",
+        "cylindrical",
+        "spherical",
+    )
     _incompatible_plot_types = ("LineIntegralConvolutionCallback",)
 
     def __init__(

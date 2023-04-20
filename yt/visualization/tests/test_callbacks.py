@@ -15,6 +15,7 @@ from yt.testing import (
     fake_random_ds,
     fake_tetrahedral_ds,
     requires_file,
+    requires_module,
 )
 from yt.utilities.answer_testing.framework import (
     PlotWindowAttributeTest,
@@ -437,6 +438,7 @@ def test_text_callback():
         assert_fname(p.save(prefix)[0])
 
 
+@requires_module("h5py")
 @requires_file(cyl_2d)
 @requires_file(cyl_3d)
 def test_velocity_callback():
@@ -504,6 +506,7 @@ def test_velocity_callback_spherical():
         assert_raises(NotImplementedError, p.save, prefix)
 
 
+@requires_module("h5py")
 @requires_file(cyl_2d)
 @requires_file(cyl_3d)
 def test_magnetic_callback():
@@ -594,6 +597,7 @@ def test_magnetic_callback():
         assert_raises(NotImplementedError, p.save, prefix)
 
 
+@requires_module("h5py")
 @requires_file(cyl_2d)
 @requires_file(cyl_3d)
 def test_quiver_callback():
@@ -682,6 +686,7 @@ def test_quiver_callback_spherical():
         assert_fname(p.save(prefix)[0])
 
 
+@requires_module("h5py")
 @requires_file(cyl_2d)
 def test_contour_callback():
     with _cleanup_fname() as prefix:
@@ -764,6 +769,7 @@ def test_contour_callback():
         )
 
 
+@requires_module("h5py")
 @requires_file(cyl_2d)
 def test_grids_callback():
     with _cleanup_fname() as prefix:
@@ -819,6 +825,7 @@ def test_grids_callback():
         assert_raises(YTDataTypeUnsupported, p.annotate_grids, **kwargs)
 
 
+@requires_module("h5py")
 @requires_file(cyl_2d)
 def test_cell_edges_callback():
     with _cleanup_fname() as prefix:
@@ -855,7 +862,6 @@ def test_cell_edges_callback():
 
 def test_mesh_lines_callback():
     with _cleanup_fname() as prefix:
-
         ds = fake_hexahedral_ds()
         for field in ds.field_list:
             sl = SlicePlot(ds, 1, field)
@@ -870,12 +876,11 @@ def test_mesh_lines_callback():
         check_axis_manipulation(sl, prefix)  # only test the final field
 
 
+@requires_module("h5py")
 @requires_file(cyl_2d)
 @requires_file(cyl_3d)
 def test_streamline_callback():
-
     with _cleanup_fname() as prefix:
-
         ds = fake_amr_ds(
             fields=("density", "velocity_x", "velocity_y", "magvel"),
             units=("g/cm**3", "cm/s", "cm/s", "cm/s"),
@@ -928,7 +933,6 @@ def test_streamline_callback():
     # Axisymmetric dataset
 
     with _cleanup_fname() as prefix:
-
         ds = load(cyl_2d)
         slc = SlicePlot(ds, "theta", ("gas", "velocity_magnitude"))
         slc.annotate_streamlines(("gas", "velocity_r"), ("gas", "velocity_z"))
@@ -950,21 +954,24 @@ def test_streamline_callback():
 
     # Spherical dataset
     with _cleanup_fname() as prefix:
-
         ds = fake_amr_ds(
             fields=("density", "velocity_r", "velocity_theta", "velocity_phi"),
             units=("g/cm**3", "cm/s", "cm/s", "cm/s"),
             geometry="spherical",
         )
-        p = SlicePlot(ds, "r", ("gas", "density"))
-        assert_raises(
-            YTDataTypeUnsupported,
-            p.annotate_streamlines,
-            ("gas", "velocity_theta"),
-            ("gas", "velocity_phi"),
+        slc = SlicePlot(ds, "phi", ("gas", "velocity_magnitude"))
+        slc.annotate_streamlines(
+            ("gas", "velocity_cylindrical_radius"), ("gas", "velocity_cylindrical_z")
         )
+        assert_fname(slc.save(prefix)[0])
+        slc = SlicePlot(ds, "theta", ("gas", "velocity_magnitude"))
+        slc.annotate_streamlines(
+            ("gas", "velocity_conic_x"), ("gas", "velocity_conic_y")
+        )
+        assert_fname(slc.save(prefix)[0])
 
 
+@requires_module("h5py")
 @requires_file(cyl_2d)
 @requires_file(cyl_3d)
 def test_line_integral_convolution_callback():
@@ -1037,13 +1044,17 @@ def test_line_integral_convolution_callback():
             units=("g/cm**3", "cm/s", "cm/s", "cm/s"),
             geometry="spherical",
         )
-        p = SlicePlot(ds, "r", ("gas", "density"))
-        assert_raises(
-            YTDataTypeUnsupported,
-            p.annotate_line_integral_convolution,
-            ("gas", "velocity_theta"),
-            ("gas", "velocity_phi"),
+        slc = SlicePlot(ds, "phi", ("gas", "velocity_magnitude"))
+        slc.annotate_line_integral_convolution(
+            ("gas", "velocity_cylindrical_radius"), ("gas", "velocity_cylindrical_z")
         )
+        assert_fname(slc.save(prefix)[0])
+        slc = SlicePlot(ds, "theta", ("gas", "velocity_magnitude"))
+        slc.annotate_line_integral_convolution(
+            ("gas", "velocity_conic_x"), ("gas", "velocity_conic_y")
+        )
+        assert_fname(slc.save(prefix)[0])
+        check_axis_manipulation(slc, prefix)
 
 
 def test_accepts_all_fields_decorator():

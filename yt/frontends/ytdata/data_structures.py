@@ -18,6 +18,7 @@ from yt.data_objects.unions import ParticleUnion
 from yt.fields.field_exceptions import NeedsGridType
 from yt.fields.field_info_container import FieldInfoContainer
 from yt.funcs import is_root, parse_h5_attr
+from yt.geometry.api import Geometry
 from yt.geometry.geometry_handler import Index
 from yt.geometry.grid_geometry_handler import GridIndex
 from yt.geometry.particle_geometry_handler import ParticleIndex
@@ -42,6 +43,7 @@ class SavedDataset(Dataset):
     Base dataset class for products of calling save_as_dataset.
     """
 
+    geometry = Geometry.CARTESIAN
     _con_attrs: Tuple[str, ...] = ()
 
     def _parse_parameter_file(self):
@@ -111,16 +113,17 @@ class SavedDataset(Dataset):
             del self.parameters[par]
 
         for attr in self._con_attrs:
+            sattr = _set_attrs.get(attr, attr)
+            if sattr == "geometry":
+                if "geometry" in self.parameters:
+                    self.geometry = Geometry(self.parameters["geometry"])
+                continue
             try:
-                sattr = _set_attrs.get(attr, attr)
                 setattr(self, sattr, self.parameters.get(attr))
             except TypeError:
                 # some Dataset attributes are properties with setters
                 # which may not accept None as an input
                 pass
-
-        if self.geometry is None:
-            self.geometry = "cartesian"
 
     def _with_parameter_file_open(self, f):
         # This allows subclasses to access the parameter file
@@ -407,7 +410,7 @@ class YTGrid(AMRGridPatch):
             fields = self._determine_fields(key)
         except YTFieldTypeNotFound:
             return tr
-        finfo = self.ds._get_field_info(*fields[0])
+        finfo = self.ds._get_field_info(fields[0])
         if not finfo.sampling_type == "particle":
             return tr.reshape(self.ActiveDimensions[: self.ds.dimensionality])
         return tr
@@ -480,7 +483,7 @@ class YTGridDataset(YTDataset):
     _index_class: Type[Index] = YTGridHierarchy
     _field_info_class = YTGridFieldInfo
     _dataset_type = "ytgridhdf5"
-    geometry = "cartesian"
+    geometry = Geometry.CARTESIAN
     default_fluid_type = "grid"
     fluid_types: Tuple[str, ...] = ("grid", "gas", "deposit", "index")
 
@@ -578,7 +581,7 @@ class YTNonspatialGrid(AMRGridPatch):
             fields = self._determine_fields(key)
         except YTFieldTypeNotFound:
             return tr
-        self.ds._get_field_info(*fields[0])
+        self.ds._get_field_info(fields[0])
         return tr
 
     def get_data(self, fields=None):
@@ -610,7 +613,7 @@ class YTNonspatialGrid(AMRGridPatch):
         for field in self._determine_fields(fields):
             if field in self.field_data:
                 continue
-            finfo = self.ds._get_field_info(*field)
+            finfo = self.ds._get_field_info(field)
             try:
                 finfo.check_available(self)
             except NeedsGridType:
@@ -628,13 +631,13 @@ class YTNonspatialGrid(AMRGridPatch):
         # We now split up into readers for the types of fields
         fluids, particles = [], []
         finfos = {}
-        for ftype, fname in fields_to_get:
-            finfo = self.ds._get_field_info(ftype, fname)
-            finfos[ftype, fname] = finfo
+        for field_key in fields_to_get:
+            finfo = self.ds._get_field_info(field_key)
+            finfos[field_key] = finfo
             if finfo.sampling_type == "particle":
-                particles.append((ftype, fname))
-            elif (ftype, fname) not in fluids:
-                fluids.append((ftype, fname))
+                particles.append(field_key)
+            elif field_key not in fluids:
+                fluids.append(field_key)
 
         # The _read method will figure out which fields it needs to get from
         # disk, and return a dict of those fields along with the fields that
@@ -712,7 +715,7 @@ class YTNonspatialDataset(YTGridDataset):
     _index_class = YTNonspatialHierarchy
     _field_info_class = YTGridFieldInfo
     _dataset_type = "ytnonspatialhdf5"
-    geometry = "cartesian"
+    geometry = Geometry.CARTESIAN
     default_fluid_type = "data"
     fluid_types: Tuple[str, ...] = ("data", "gas")
 

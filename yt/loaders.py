@@ -9,15 +9,21 @@ import tarfile
 import time
 import types
 import warnings
+from importlib.metadata import entry_points
 from multiprocessing import Pipe, Process
 from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 from urllib.parse import urlsplit
 
 import numpy as np
 from more_itertools import always_iterable
 
+from yt._maintenance.deprecation import (
+    future_positional_only,
+    issue_deprecation_warning,
+)
+from yt._typing import AnyFieldKey, AxisOrder, FieldKey
 from yt.data_objects.static_output import Dataset
 from yt.funcs import levenshtein_distance
 from yt.sample_data.api import lookup_on_disk_data
@@ -41,6 +47,7 @@ from yt.utilities.on_demand_imports import _pooch as pooch, _ratarmount as ratar
 # --- Loaders for known data formats ---
 
 
+@future_positional_only({0: "fn"}, since="4.2.0")
 def load(
     fn: Union[str, "os.PathLike[str]"], *args, hint: Optional[str] = None, **kwargs
 ):
@@ -81,9 +88,9 @@ def load(
         If fn matches existing files or directories with undetermined format.
 
     yt.utilities.exceptions.YTAmbiguousDataType
-        If the data format matches more than one class of similar specilization levels.
+        If the data format matches more than one class of similar specialization levels.
     """
-    fn = os.fspath(fn)
+    fn = os.path.expanduser(fn)
 
     if any(wildcard in fn for wildcard in "[]?!*"):
         from yt.data_objects.time_series import DatasetSeries
@@ -95,13 +102,26 @@ def load(
     if not fn.startswith("http"):
         fn = str(lookup_on_disk_data(fn))
 
+    if sys.version_info >= (3, 10):
+        external_frontends = entry_points(group="yt.frontends")
+    else:
+        external_frontends = entry_points().get("yt.frontends", [])
+
+    # Ensure that external frontends are loaded
+    for entrypoint in external_frontends:
+        entrypoint.load()
+
     candidates = []
     for cls in output_type_registry.values():
         if cls._is_valid(fn, *args, **kwargs):
             candidates.append(cls)
 
+    # Filter the candidates if a hint was given
+    if hint is not None:
+        candidates = [c for c in candidates if hint.lower() in c.__name__.lower()]
+
     # Find only the lowest subclasses, i.e. most specialised front ends
-    candidates = find_lowest_subclasses(candidates, hint=hint)
+    candidates = find_lowest_subclasses(candidates)
 
     if len(candidates) == 1:
         return candidates[0](fn, *args, **kwargs)
@@ -149,6 +169,24 @@ def load_simulation(fn, simulation_type, find_outputs=False):
 # --- Loaders for generic ("stream") data ---
 
 
+def _sanitize_axis_order_args(
+    geometry: Union[str, Tuple[str, AxisOrder]], axis_order: Optional[AxisOrder]
+) -> Tuple[str, Optional[AxisOrder]]:
+    # this entire function should be removed at the end of its deprecation cycle
+    geometry_str: str
+    if isinstance(geometry, tuple):
+        issue_deprecation_warning(
+            f"Received a tuple as {geometry=}\n"
+            "Use the `axis_order` argument instead.",
+            since="4.2",
+            stacklevel=4,
+        )
+        geometry_str, axis_order = geometry
+    else:
+        geometry_str = geometry
+    return geometry_str, axis_order
+
+
 def load_uniform_grid(
     data,
     domain_dimensions,
@@ -165,8 +203,10 @@ def load_uniform_grid(
     unit_system="cgs",
     default_species_fields=None,
     *,
+    axis_order: Optional[AxisOrder] = None,
     cell_widths=None,
     parameters=None,
+    dataset_name: str = "UniformGridData",
 ):
     r"""Load a uniform grid of data into yt as a
     :class:`~yt.frontends.stream.data_structures.StreamHandler`.
@@ -212,19 +252,30 @@ def load_uniform_grid(
     periodicity : tuple of booleans
         Determines whether the data will be treated as periodic along
         each axis
-    geometry : string or tuple
+    geometry : string (or tuple, deprecated)
         "cartesian", "cylindrical", "polar", "spherical", "geographic" or
-        "spectral_cube".  Optionally, a tuple can be provided to specify the
-        axis ordering -- for instance, to specify that the axis ordering should
+        "spectral_cube".
+        [DEPRECATED]: Optionally, a tuple can be provided to specify the axis ordering.
+        For instance, to specify that the axis ordering should
         be z, x, y, this would be: ("cartesian", ("z", "x", "y")).  The same
         can be done for other coordinates, for instance:
         ("spherical", ("theta", "phi", "r")).
     default_species_fields : string, optional
         If set, default species fields are created for H and He which also
         determine the mean molecular weight. Options are "ionized" and "neutral".
+    axis_order: tuple of three strings, optional
+        Force axis ordering, e.g. ("z", "y", "x") with cartesian geometry
+        Otherwise use geometry-specific default ordering.
+    cell_widths: list, optional
+        If set, cell_widths is a list of arrays with an array for each dimension,
+        specificing the cell spacing in that dimension. Must be consistent with
+        the domain_dimensions. nprocs must remain 1 to set cell_widths.
     parameters: dictionary, optional
         Optional dictionary used to populate the dataset parameters, useful
         for storing dataset metadata.
+    dataset_name: string, optional
+        Optional string used to assign a name to the dataset. Stream datasets will use
+        this value in place of a filename (in image prefixing, etc.)
 
     Examples
     --------
@@ -248,7 +299,9 @@ def load_uniform_grid(
         process_data,
         set_particle_types,
     )
+    from yt.frontends.stream.misc import _validate_cell_widths
 
+    geometry, axis_order = _sanitize_axis_order_args(geometry, axis_order)
     domain_dimensions = np.array(domain_dimensions)
     if bbox is None:
         bbox = np.array([[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]], "float64")
@@ -266,13 +319,17 @@ def load_uniform_grid(
     if number_of_particles > 0:
         particle_types = set_particle_types(data)
         # Used much further below.
-        pdata = {"number_of_particles": number_of_particles}
+        pdata: Dict[Union[str, FieldKey], Any] = {
+            "number_of_particles": number_of_particles
+        }
         for key in list(data.keys()):
             if len(data[key].shape) == 1 or key[0] == "io":
+                field: FieldKey
                 if not isinstance(key, tuple):
                     field = ("io", key)
                     mylog.debug("Reassigning '%s' to '%s'", key, field)
                 else:
+                    key = cast(FieldKey, key)
                     field = key
                 sfh._additional_fields += (field,)
                 pdata[field] = data.pop(key)
@@ -281,7 +338,7 @@ def load_uniform_grid(
 
     if nprocs > 1:
         temp = {}
-        new_data = {}
+        new_data = {}  # type: ignore [var-annotated]
         for key in data.keys():
             psize = get_psize(np.array(data[key].shape), nprocs)
             grid_left_edges, grid_right_edges, shapes, slices = decompose_array(
@@ -302,8 +359,11 @@ def load_uniform_grid(
         grid_dimensions = domain_dimensions.reshape(nprocs, 3).astype("int32")
 
     if cell_widths is not None:
-        # make sure this is a list, or else leave it as an empty guard value
-        cell_widths = [cell_widths]
+        # cell_widths left as an empty guard value if None
+        if nprocs != 1:
+            # see https://github.com/yt-project/yt/issues/4330
+            raise NotImplementedError("nprocs must equal 1 if supplying cell_widths.")
+        cell_widths = _validate_cell_widths(cell_widths, domain_dimensions)
 
     if length_unit is None:
         length_unit = "code_length"
@@ -333,24 +393,25 @@ def load_uniform_grid(
         parameters=parameters,
     )
 
-    handler.name = "UniformGridData"
-    handler.domain_left_edge = domain_left_edge
-    handler.domain_right_edge = domain_right_edge
-    handler.refine_by = 2
+    handler.name = dataset_name  # type: ignore [attr-defined]
+    handler.domain_left_edge = domain_left_edge  # type: ignore [attr-defined]
+    handler.domain_right_edge = domain_right_edge  # type: ignore [attr-defined]
+    handler.refine_by = 2  # type: ignore [attr-defined]
     if np.all(domain_dimensions[1:] == 1):
         dimensionality = 1
     elif domain_dimensions[2] == 1:
         dimensionality = 2
     else:
         dimensionality = 3
-    handler.dimensionality = dimensionality
-    handler.domain_dimensions = domain_dimensions
-    handler.simulation_time = sim_time
-    handler.cosmology_simulation = 0
+    handler.dimensionality = dimensionality  # type: ignore [attr-defined]
+    handler.domain_dimensions = domain_dimensions  # type: ignore [attr-defined]
+    handler.simulation_time = sim_time  # type: ignore [attr-defined]
+    handler.cosmology_simulation = 0  # type: ignore [attr-defined]
 
     sds = StreamDataset(
         handler,
         geometry=geometry,
+        axis_order=axis_order,
         unit_system=unit_system,
         default_species_fields=default_species_fields,
     )
@@ -380,6 +441,8 @@ def load_amr_grids(
     default_species_fields=None,
     *,
     parameters=None,
+    dataset_name: str = "AMRGridData",
+    axis_order: Optional[AxisOrder] = None,
 ):
     r"""Load a set of grids of data into yt as a
     :class:`~yt.frontends.stream.data_structures.StreamHandler`.
@@ -428,10 +491,11 @@ def load_amr_grids(
     periodicity : tuple of booleans
         Determines whether the data will be treated as periodic along
         each axis
-    geometry : string or tuple
+    geometry : string (or tuple, deprecated)
         "cartesian", "cylindrical", "polar", "spherical", "geographic" or
-        "spectral_cube".  Optionally, a tuple can be provided to specify the
-        axis ordering -- for instance, to specify that the axis ordering should
+        "spectral_cube".
+        [DEPRECATED]: Optionally, a tuple can be provided to specify the axis ordering.
+        For instance, to specify that the axis ordering should
         be z, x, y, this would be: ("cartesian", ("z", "x", "y")).  The same
         can be done for other coordinates, for instance:
         ("spherical", ("theta", "phi", "r")).
@@ -447,6 +511,12 @@ def load_amr_grids(
     parameters: dictionary, optional
         Optional dictionary used to populate the dataset parameters, useful
         for storing dataset metadata.
+    dataset_name: string, optional
+        Optional string used to assign a name to the dataset. Stream datasets will use
+        this value in place of a filename (in image prefixing, etc.)
+    axis_order: tuple of three strings, optional
+        Force axis ordering, e.g. ("z", "y", "x") with cartesian geometry
+        Otherwise use geometry-specific default ordering.
 
     Examples
     --------
@@ -483,6 +553,7 @@ def load_amr_grids(
     )
     from yt.frontends.stream.definitions import process_data, set_particle_types
 
+    geometry, axis_order = _sanitize_axis_order_args(geometry, axis_order)
     domain_dimensions = np.array(domain_dimensions)
     ngrids = len(grid_data)
     if bbox is None:
@@ -567,24 +638,25 @@ def load_amr_grids(
         parameters=parameters,
     )
 
-    handler.name = "AMRGridData"
-    handler.domain_left_edge = domain_left_edge
-    handler.domain_right_edge = domain_right_edge
-    handler.refine_by = refine_by
+    handler.name = dataset_name  # type: ignore [attr-defined]
+    handler.domain_left_edge = domain_left_edge  # type: ignore [attr-defined]
+    handler.domain_right_edge = domain_right_edge  # type: ignore [attr-defined]
+    handler.refine_by = refine_by  # type: ignore [attr-defined]
     if np.all(domain_dimensions[1:] == 1):
         dimensionality = 1
     elif domain_dimensions[2] == 1:
         dimensionality = 2
     else:
         dimensionality = 3
-    handler.dimensionality = dimensionality
-    handler.domain_dimensions = domain_dimensions
-    handler.simulation_time = sim_time
-    handler.cosmology_simulation = 0
+    handler.dimensionality = dimensionality  # type: ignore [attr-defined]
+    handler.domain_dimensions = domain_dimensions  # type: ignore [attr-defined]
+    handler.simulation_time = sim_time  # type: ignore [attr-defined]
+    handler.cosmology_simulation = 0  # type: ignore [attr-defined]
 
     sds = StreamDataset(
         handler,
         geometry=geometry,
+        axis_order=axis_order,
         unit_system=unit_system,
         default_species_fields=default_species_fields,
     )
@@ -592,7 +664,7 @@ def load_amr_grids(
 
 
 def load_particles(
-    data,
+    data: Dict[AnyFieldKey, np.ndarray],
     length_unit=None,
     bbox=None,
     sim_time=None,
@@ -606,7 +678,9 @@ def load_particles(
     data_source=None,
     default_species_fields=None,
     *,
+    axis_order: Optional[AxisOrder] = None,
     parameters=None,
+    dataset_name: str = "ParticleData",
 ):
     r"""Load a set of particles into yt as a
     :class:`~yt.frontends.stream.data_structures.StreamParticleHandler`.
@@ -647,15 +721,24 @@ def load_particles(
     periodicity : tuple of booleans
         Determines whether the data will be treated as periodic along
         each axis
+    geometry : string (or tuple, deprecated)
+        "cartesian", "cylindrical", "polar", "spherical", "geographic" or
+        "spectral_cube".
     data_source : YTSelectionContainer, optional
         If set, parameters like `bbox`, `sim_time`, and code units are derived
         from it.
     default_species_fields : string, optional
         If set, default species fields are created for H and He which also
         determine the mean molecular weight. Options are "ionized" and "neutral".
+    axis_order: tuple of three strings, optional
+        Force axis ordering, e.g. ("z", "y", "x") with cartesian geometry
+        Otherwise use geometry-specific default ordering.
     parameters: dictionary, optional
         Optional dictionary used to populate the dataset parameters, useful
         for storing dataset metadata.
+    dataset_name: string, optional
+        Optional string used to assign a name to the dataset. Stream datasets will use
+        this value in place of a filename (in image prefixing, etc.)
 
     Examples
     --------
@@ -720,8 +803,9 @@ def load_particles(
     field_units, data, _ = process_data(data)
     sfh = StreamDictFieldHandler()
 
-    pdata = {}
+    pdata: Dict[AnyFieldKey, np.ndarray] = {}
     for key in data.keys():
+        field: FieldKey
         if not isinstance(key, tuple):
             field = ("io", key)
             mylog.debug("Reassigning '%s' to '%s'", key, field)
@@ -753,20 +837,21 @@ def load_particles(
         parameters=parameters,
     )
 
-    handler.name = "ParticleData"
-    handler.domain_left_edge = domain_left_edge
-    handler.domain_right_edge = domain_right_edge
-    handler.refine_by = 2
-    handler.dimensionality = 3
-    handler.domain_dimensions = domain_dimensions
-    handler.simulation_time = sim_time
-    handler.cosmology_simulation = 0
+    handler.name = dataset_name  # type: ignore [attr-defined]
+    handler.domain_left_edge = domain_left_edge  # type: ignore [attr-defined]
+    handler.domain_right_edge = domain_right_edge  # type: ignore [attr-defined]
+    handler.refine_by = 2  # type: ignore [attr-defined]
+    handler.dimensionality = 3  # type: ignore [attr-defined]
+    handler.domain_dimensions = domain_dimensions  # type: ignore [attr-defined]
+    handler.simulation_time = sim_time  # type: ignore [attr-defined]
+    handler.cosmology_simulation = 0  # type: ignore [attr-defined]
 
     sds = StreamParticlesDataset(
         handler,
         geometry=geometry,
         unit_system=unit_system,
         default_species_fields=default_species_fields,
+        axis_order=axis_order,
     )
 
     return sds
@@ -787,7 +872,9 @@ def load_hexahedral_mesh(
     geometry="cartesian",
     unit_system="cgs",
     *,
+    axis_order: Optional[AxisOrder] = None,
     parameters=None,
+    dataset_name: str = "HexahedralMeshData",
 ):
     r"""Load a hexahedral mesh of data into yt as a
     :class:`~yt.frontends.stream.data_structures.StreamHandler`.
@@ -831,16 +918,23 @@ def load_hexahedral_mesh(
     periodicity : tuple of booleans
         Determines whether the data will be treated as periodic along
         each axis
-    geometry : string or tuple
+    geometry : string (or tuple, deprecated)
         "cartesian", "cylindrical", "polar", "spherical", "geographic" or
-        "spectral_cube".  Optionally, a tuple can be provided to specify the
-        axis ordering -- for instance, to specify that the axis ordering should
+        "spectral_cube".
+        [DEPRECATED]: Optionally, a tuple can be provided to specify the axis ordering.
+        For instance, to specify that the axis ordering should
         be z, x, y, this would be: ("cartesian", ("z", "x", "y")).  The same
         can be done for other coordinates, for instance:
         ("spherical", ("theta", "phi", "r")).
+    axis_order: tuple of three strings, optional
+        Force axis ordering, e.g. ("z", "y", "x") with cartesian geometry
+        Otherwise use geometry-specific default ordering.
     parameters: dictionary, optional
         Optional dictionary used to populate the dataset parameters, useful
         for storing dataset metadata.
+    dataset_name: string, optional
+        Optional string used to assign a name to the dataset. Stream datasets will use
+        this value in place of a filename (in image prefixing, etc.)
     """
     from yt.frontends.stream.data_structures import (
         StreamDictFieldHandler,
@@ -849,6 +943,7 @@ def load_hexahedral_mesh(
     )
     from yt.frontends.stream.definitions import process_data, set_particle_types
 
+    geometry, axis_order = _sanitize_axis_order_args(geometry, axis_order)
     domain_dimensions = np.ones(3, "int32") * 2
     nprocs = 1
     if bbox is None:
@@ -904,16 +999,18 @@ def load_hexahedral_mesh(
         parameters=parameters,
     )
 
-    handler.name = "HexahedralMeshData"
-    handler.domain_left_edge = domain_left_edge
-    handler.domain_right_edge = domain_right_edge
-    handler.refine_by = 2
-    handler.dimensionality = 3
-    handler.domain_dimensions = domain_dimensions
-    handler.simulation_time = sim_time
-    handler.cosmology_simulation = 0
+    handler.name = dataset_name  # type: ignore [attr-defined]
+    handler.domain_left_edge = domain_left_edge  # type: ignore [attr-defined]
+    handler.domain_right_edge = domain_right_edge  # type: ignore [attr-defined]
+    handler.refine_by = 2  # type: ignore [attr-defined]
+    handler.dimensionality = 3  # type: ignore [attr-defined]
+    handler.domain_dimensions = domain_dimensions  # type: ignore [attr-defined]
+    handler.simulation_time = sim_time  # type: ignore [attr-defined]
+    handler.cosmology_simulation = 0  # type: ignore [attr-defined]
 
-    sds = StreamHexahedralDataset(handler, geometry=geometry, unit_system=unit_system)
+    sds = StreamHexahedralDataset(
+        handler, geometry=geometry, axis_order=axis_order, unit_system=unit_system
+    )
 
     return sds
 
@@ -936,6 +1033,7 @@ def load_octree(
     default_species_fields=None,
     *,
     parameters=None,
+    dataset_name: str = "OctreeData",
 ):
     r"""Load an octree mask into yt.
 
@@ -986,6 +1084,9 @@ def load_octree(
     parameters: dictionary, optional
         Optional dictionary used to populate the dataset parameters, useful
         for storing dataset metadata.
+    dataset_name : string, optional
+        Optional string used to assign a name to the dataset. Stream datasets will use
+        this value in place of a filename (in image prefixing, etc.)
 
     Example
     -------
@@ -1067,21 +1168,21 @@ def load_octree(
         parameters=parameters,
     )
 
-    handler.name = "OctreeData"
-    handler.domain_left_edge = domain_left_edge
-    handler.domain_right_edge = domain_right_edge
-    handler.refine_by = 2
-    handler.dimensionality = 3
-    handler.domain_dimensions = domain_dimensions
-    handler.simulation_time = sim_time
-    handler.cosmology_simulation = 0
+    handler.name = dataset_name  # type: ignore [attr-defined]
+    handler.domain_left_edge = domain_left_edge  # type: ignore [attr-defined]
+    handler.domain_right_edge = domain_right_edge  # type: ignore [attr-defined]
+    handler.refine_by = 2  # type: ignore [attr-defined]
+    handler.dimensionality = 3  # type: ignore [attr-defined]
+    handler.domain_dimensions = domain_dimensions  # type: ignore [attr-defined]
+    handler.simulation_time = sim_time  # type: ignore [attr-defined]
+    handler.cosmology_simulation = 0  # type: ignore [attr-defined]
 
     sds = StreamOctreeDataset(
         handler, unit_system=unit_system, default_species_fields=default_species_fields
     )
-    sds.octree_mask = octree_mask
-    sds.partial_coverage = partial_coverage
-    sds.num_zones = num_zones
+    sds.octree_mask = octree_mask  # type: ignore [attr-defined]
+    sds.partial_coverage = partial_coverage  # type: ignore [attr-defined]
+    sds.num_zones = num_zones  # type: ignore [attr-defined]
 
     return sds
 
@@ -1102,7 +1203,9 @@ def load_unstructured_mesh(
     geometry="cartesian",
     unit_system="cgs",
     *,
+    axis_order: Optional[AxisOrder] = None,
     parameters=None,
+    dataset_name: str = "UnstructuredMeshData",
 ):
     r"""Load an unstructured mesh of data into yt as a
     :class:`~yt.frontends.stream.data_structures.StreamHandler`.
@@ -1166,16 +1269,23 @@ def load_unstructured_mesh(
     periodicity : tuple of booleans
         Determines whether the data will be treated as periodic along
         each axis
-    geometry : string or tuple
+    geometry : string (or tuple, deprecated)
         "cartesian", "cylindrical", "polar", "spherical", "geographic" or
-        "spectral_cube".  Optionally, a tuple can be provided to specify the
-        axis ordering -- for instance, to specify that the axis ordering should
+        "spectral_cube".
+        [DEPRECATED]: Optionally, a tuple can be provided to specify the axis ordering.
+        For instance, to specify that the axis ordering should
         be z, x, y, this would be: ("cartesian", ("z", "x", "y")).  The same
         can be done for other coordinates, for instance:
         ("spherical", ("theta", "phi", "r")).
+    axis_order: tuple of three strings, optional
+        Force axis ordering, e.g. ("z", "y", "x") with cartesian geometry
+        Otherwise use geometry-specific default ordering.
     parameters: dictionary, optional
         Optional dictionary used to populate the dataset parameters, useful
         for storing dataset metadata.
+    dataset_name: string, optional
+        Optional string used to assign a name to the dataset. Stream datasets will use
+        this value in place of a filename (in image prefixing, etc.)
 
     Examples
     --------
@@ -1218,6 +1328,7 @@ def load_unstructured_mesh(
     )
     from yt.frontends.stream.definitions import process_data, set_particle_types
 
+    geometry, axis_order = _sanitize_axis_order_args(geometry, axis_order)
     dimensionality = coordinates.shape[1]
     domain_dimensions = np.ones(3, "int32") * 2
     nprocs = 1
@@ -1231,7 +1342,7 @@ def load_unstructured_mesh(
     elem_data = list(always_iterable(elem_data, base_type=dict)) or [{}] * num_meshes
     node_data = list(always_iterable(node_data, base_type=dict)) or [{}] * num_meshes
 
-    data = [{} for i in range(num_meshes)]
+    data = [{} for i in range(num_meshes)]  # type: ignore [var-annotated]
     for elem_dict, data_dict in zip(elem_data, data):
         for field, values in elem_dict.items():
             data_dict[field] = values
@@ -1308,17 +1419,17 @@ def load_unstructured_mesh(
         parameters=parameters,
     )
 
-    handler.name = "UnstructuredMeshData"
-    handler.domain_left_edge = domain_left_edge
-    handler.domain_right_edge = domain_right_edge
-    handler.refine_by = 2
-    handler.dimensionality = dimensionality
-    handler.domain_dimensions = domain_dimensions
-    handler.simulation_time = sim_time
-    handler.cosmology_simulation = 0
+    handler.name = dataset_name  # type: ignore [attr-defined]
+    handler.domain_left_edge = domain_left_edge  # type: ignore [attr-defined]
+    handler.domain_right_edge = domain_right_edge  # type: ignore [attr-defined]
+    handler.refine_by = 2  # type: ignore [attr-defined]
+    handler.dimensionality = dimensionality  # type: ignore [attr-defined]
+    handler.domain_dimensions = domain_dimensions  # type: ignore [attr-defined]
+    handler.simulation_time = sim_time  # type: ignore [attr-defined]
+    handler.cosmology_simulation = 0  # type: ignore [attr-defined]
 
     sds = StreamUnstructuredMeshDataset(
-        handler, geometry=geometry, unit_system=unit_system
+        handler, geometry=geometry, axis_order=axis_order, unit_system=unit_system
     )
 
     fluid_types = ["all"]
@@ -1329,8 +1440,8 @@ def load_unstructured_mesh(
     def flatten(l):
         return [item for sublist in l for item in sublist]
 
-    sds._node_fields = flatten([[f[1] for f in m] for m in node_data if m])
-    sds._elem_fields = flatten([[f[1] for f in m] for m in elem_data if m])
+    sds._node_fields = flatten([[f[1] for f in m] for m in node_data if m])  # type: ignore [attr-defined]
+    sds._elem_fields = flatten([[f[1] for f in m] for m in elem_data if m])  # type: ignore [attr-defined]
     sds.default_field = [f for f in sds.field_list if f[0] == "connect1"][-1]
     sds.default_fluid_type = sds.default_field[0]
     return sds
@@ -1480,7 +1591,6 @@ def load_sample(
         with tarfile.open(tmp_file) as fh:
 
             def is_within_directory(directory, target):
-
                 abs_directory = os.path.abspath(directory)
                 abs_target = os.path.abspath(target)
 
@@ -1489,7 +1599,6 @@ def load_sample(
                 return prefix == abs_directory
 
             def safe_extract(tar, path=".", members=None, *, numeric_owner=False):
-
                 for member in tar.getmembers():
                     member_path = os.path.join(path, member.name)
                     if not is_within_directory(path, member_path):
@@ -1573,7 +1682,8 @@ def load_archive(
     """
 
     warnings.warn(
-        "The 'load_archive' function is still experimental and may be unstable."
+        "The 'load_archive' function is still experimental and may be unstable.",
+        stacklevel=2,
     )
 
     fn = os.path.expanduser(fn)
@@ -1588,8 +1698,8 @@ def load_archive(
 
     try:
         tarfile.open(fn)
-    except tarfile.ReadError:
-        raise YTUnidentifiedDataType(fn, *args, **kwargs)
+    except tarfile.ReadError as exc:
+        raise YTUnidentifiedDataType(fn, *args, **kwargs) from exc
 
     # Note: the temporary directory will be created by ratarmount
     tempdir = fn + ".mount"
@@ -1603,7 +1713,7 @@ def load_archive(
     proc = Process(target=_mount_helper, args=(fn, tempdir, ratarmount_kwa, child_conn))
     proc.start()
     if not parent_conn.recv():
-        raise MountError(f"An error occured while mounting {fn} in {tempdir}")
+        raise MountError(f"An error occurred while mounting {fn} in {tempdir}")
 
     # Note: the mounting needs to happen in another process which
     # needs be run in the foreground (otherwise it may
@@ -1639,7 +1749,7 @@ def load_hdf5_file(
     fn: Union[str, "os.PathLike[str]"],
     root_node: Optional[str] = "/",
     fields: Optional[List[str]] = None,
-    bbox: np.ndarray = None,
+    bbox: Optional[np.ndarray] = None,
     nchunks: int = 0,
     dataset_arguments: Optional[dict] = None,
 ):
